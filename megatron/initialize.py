@@ -142,7 +142,7 @@ def _compile_dependencies():
               'Compilation time: {:.3f} seconds'.format(
                   time.time() - start_time), flush=True)
 
-
+torch.distributed.init_process_group
 
 def _initialize_distributed():
     """Initialize torch.distributed and core model parallel."""
@@ -171,6 +171,7 @@ def _initialize_distributed():
                 args.local_rank = device
             torch.cuda.set_device(device)
     # Call the init process
+    print(args.world_size, args.rank)
     torch.distributed.init_process_group(
         backend=args.distributed_backend,
         world_size=args.world_size, rank=args.rank,
