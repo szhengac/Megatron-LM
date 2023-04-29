@@ -1290,7 +1290,7 @@ class ParallelTransformer(MegatronModule):
                         'encoder_output': encoder_output,
                         'enc_dec_attn_mask': enc_dec_attn_mask,
                         'inference_params': inference_params,
-                        'rotary_pos_emb': rotary_pos_emb,
+                        #'rotary_pos_emb': rotary_pos_emb,
                     }
 
                     if self.transformer_impl == 'transformer_engine':
