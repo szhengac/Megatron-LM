@@ -10,16 +10,16 @@ DATASET="../transformers-benchmarks/data/gpt2-sample_text_document"
 
 
 options=" \
-	--tensor-model-parallel-size 8 \
-	--pipeline-model-parallel-size 1 \
-        --num-layers 48 \
-        --hidden-size 6144 \
-        --num-attention-heads 64 \
+	--tensor-model-parallel-size 4 \
+	--pipeline-model-parallel-size 2 \
+        --num-layers 50 \
+        --hidden-size 7168 \
+        --num-attention-heads 56 \
         --seq-length 2048 \
         --max-position-embeddings 2048 \
-	--micro-batch-size 4 \
-	--global-batch-size 4 \
-	--train-iters 30 \
+	--micro-batch-size 1 \
+	--global-batch-size 32 \
+	--train-iters 50 \
         --lr 6.0e-6 \
 	--lr-warmup-fraction 0.5 \
 	--min-lr 6.0e-7 \

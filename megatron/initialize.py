@@ -142,7 +142,6 @@ def _compile_dependencies():
               'Compilation time: {:.3f} seconds'.format(
                   time.time() - start_time), flush=True)
 
-torch.distributed.init_process_group
 
 def _initialize_distributed():
     """Initialize torch.distributed and core model parallel."""

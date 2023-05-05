@@ -47,8 +47,8 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
         args = parser.parse_args()
 
     # Args from environment
-    #args.rank = int(os.getenv('RANK', '0'))
-    args.rank = int(os.getenv('OMPI_COMM_WORLD_RANK', '0'))
+    args.rank = int(os.getenv('RANK', '0'))
+    #args.rank = int(os.getenv('OMPI_COMM_WORLD_RANK', '0'))
     args.world_size = int(os.getenv("WORLD_SIZE", '1'))
         
     return args
