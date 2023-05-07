@@ -1,34 +1,30 @@
 #!/bin/bash
 
-
-DIR=`pwd`
-DATETIME=`date +'date_%y-%m-%d_time_%H-%M-%S'`
-mkdir -p $DIR/logs
-
 #SBATCH --job-name=megatron
 #SBATCH --partition=h100
-
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=8
 #SBATCH --gpus-per-task=1
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=8
-#SBATCH --gres-flags=enforce-binding
-#SBATCH --exclusive
+
+DIR=`pwd`
+DATETIME=`date +'date_%y-%m-%d_time_%H-%M-%S'`
+mkdir -p $DIR/logs
 
 DATASET="${DIR}/../transformers-benchmarks/data/gpt2-sample_text_document"
 
 
 options=" \
-	--tensor-model-parallel-size 2 \
+	--tensor-model-parallel-size 8 \
 	--pipeline-model-parallel-size 1 \
-        --num-layers 24 \
-        --hidden-size 4096 \
-        --num-attention-heads 32 \
+        --num-layers 48 \
+        --hidden-size 6144 \
+        --num-attention-heads 64 \
         --seq-length 2048 \
         --max-position-embeddings 2048 \
 	--micro-batch-size 4 \
-	--global-batch-size 32 \
+	--global-batch-size 4 \
 	--train-iters 50 \
         --lr 6.0e-6 \
 	--lr-warmup-fraction 0.5 \
@@ -49,28 +45,22 @@ options=" \
 	--init-method-std 0.006 \
         --bf16 \
 	--use-flash-attn \
-	--transformer-impl local \
+	--transformer-impl transformer_engine \
 	--sequence-parallel "
 
-#-x NCCL_DEBUG=WARN \
-#-x MASTER_ADDR=127.0.0.1 \
-#-x MASTER_PORT=9783 \
-#-x WORLD_SIZE=8 \
-#-x CUDA_DEVICE_MAX_CONNECTIONS=1 \
-#-x NVTE_FLASH_ATTN=1 \
-
 run_cmd="python3 -u ${DIR}/pretrain_gpt.py $@ ${options}"
-#XDG_DATA_HOME=/run/tmp
+
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export NCCL_DEBUG=WARN
+
+#export MASTER_ADDR=127.0.0.1
+#export MASTER_PORT=9783 
+#export WORLD_SIZE=8
 
 srun -l \
-     --nodes=1 \
-     --gpus=8 \
-     --gpus-per-task=1 \
-     --ntasks-per-node=8 \
-     --cpus-per-task=28 \
      --container-image /run/enroot/pt.sqsh \
-     --container-mounts /home/boson:/home/boson,/run:/fsx \
-     --export="CUDA_DEVICE_MAX_CONNECTIONS=1,PWD=/workspace/Megatron-LM,NCCL_DEBUG=WARN,MASTER_PORT=9783,WORLD_SIZE=8,MASTER_ADDR=127.0.0.1" \
+     --container-mounts /run:/fsx \
+     --container-mount-home \
      --output=$DIR/logs/%x_%j_$DATETIME.log bash -c "${run_cmd}"
 
 set +x
