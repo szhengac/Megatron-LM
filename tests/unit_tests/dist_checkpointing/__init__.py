@@ -3,7 +3,7 @@ import weakref
 from pathlib import Path
 from shutil import rmtree
 from tempfile import TemporaryDirectory
-from typing import Union
+from typing import Union, Optional
 
 from tests.unit_tests.test_utilities import Utils
 
@@ -33,8 +33,9 @@ class TempNamedDir(TemporaryDirectory):
 
         self.sync = sync
 
-    def cleanup(self) -> None:
-        if self.sync:
+    def cleanup(self, override_sync: Optional[bool] = None) -> None:
+        sync = self.sync if override_sync is None else override_sync
+        if sync :
             import torch
             torch.distributed.barrier()
 
@@ -43,4 +44,8 @@ class TempNamedDir(TemporaryDirectory):
 
     def __enter__(self):
         return Path(super().__enter__())
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        raised = exc_type is not None
+        self.cleanup(False if raised else None)
 
