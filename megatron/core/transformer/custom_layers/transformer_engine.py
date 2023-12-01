@@ -149,10 +149,12 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         # and we don't have to deal with the zero length Tensor.
         self.te_return_bias = skip_bias_add and bias
 
+        extra_kwargs = _get_extra_te_kwargs(config)
+
         # Only Transformer-Engine version >= 0.11.0 supports `RMSNorm`
         te_version = packaging.version.Version(version("transformer-engine"))
         if te_version >= packaging.version.Version("0.11.0"):
-            kwargs["normalization"] = self.config.normalization
+            extra_kwargs["normalization"] = self.config.normalization
 
         super().__init__(
             in_features=input_size,
@@ -167,7 +169,7 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             params_dtype=self.config.params_dtype,
             parallel_mode="column",
             return_bias=self.te_return_bias,
-            **_get_extra_te_kwargs(config),
+            **extra_kwargs,
         )
 
     def forward(self, x):
