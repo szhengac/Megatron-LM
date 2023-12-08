@@ -8,6 +8,7 @@ from megatron.core.transformer.custom_layers.transformer_engine import (
     TEDotProductAttention,
     TELayerNormColumnParallelLinear,
     TERowParallelLinear,
+    TENorm,
 )
 from megatron.core.transformer.dot_product_attention import DotProductAttention
 from megatron.core.transformer.enums import AttnMaskType
@@ -87,7 +88,7 @@ gpt_layer_with_transformer_engine_spec_moe = ModuleSpec(
             ),
         ),
         self_attn_bda=get_bias_dropout_add,
-        pre_mlp_layernorm=FusedLayerNorm,
+        pre_mlp_layernorm=TENorm,
         mlp=ModuleSpec(
             module=SwitchMLP,  # MOE
             submodules=MLPSubmodules(
