@@ -215,6 +215,14 @@ class TransformerLayer(BaseLayer):
             'mlp.linear_fc2.weight': 1,
         }
 
+        # Expert layer axis map
+        num_local_experts = self.config.num_moe_experts // parallel_state.get_expert_model_parallel_world_size()
+        for local_expert_idx in range(num_local_experts):
+            tensor_parallel_layers_axis_map.update(
+                    {f'mlp.local_experts.{local_expert_idx}.linear_fc1.weight': 0,
+                     f'mlp.local_experts.{local_expert_idx}.linear_fc1.bias': 0,
+                     f'mlp.local_experts.{local_expert_idx}.linear_fc2.weight': 1,})
+
         offset = self._get_layer_offset()
         num_layers = self.config.num_layers
 
@@ -226,7 +234,7 @@ class TransformerLayer(BaseLayer):
             layer_key = f'{prefix}{global_layer_offset - offset}.{layer_name}'  # module list index in TransformerBlock
             sharded_offsets = [(0, global_layer_offset, num_layers)]  # PP sharding
 
-            if layer_name in tensor_parallel_layers_axis_map:
+            if layer_name in tensor_parallel_layers_axis_map and 'local_experts' not in layer_name:
                 tp_axis = tensor_parallel_layers_axis_map[layer_name]
                 # TP sharding
                 sharded_offsets.append(
@@ -237,6 +245,25 @@ class TransformerLayer(BaseLayer):
                     ]
                 )
                 replica_id = parallel_state.get_data_parallel_rank()
+            elif layer_name in tensor_parallel_layers_axis_map and 'local_experts' in layer_name:
+                tp_axis = tensor_parallel_layers_axis_map[layer_name]
+                # TP sharding
+                sharded_offsets.append(
+                    [
+                        tp_axis + 2,  # +2 for PP and EP dimensions
+                        parallel_state.get_tensor_model_parallel_rank(),
+                        parallel_state.get_tensor_model_parallel_world_size(),
+                    ]
+                )
+                # EP sharding
+                sharded_offsets.append(
+                    [
+                        1,  # +1 for PP dimension
+                        parallel_state.get_expert_model_parallel_rank(),
+                        parallel_state.get_expert_model_parallel_world_size()
+                    ]
+                )
+                replica_id = parallel_state.get_data_modulo_expert_parallel_rank()
             else:
                 replica_id = (
                     parallel_state.get_data_parallel_rank()
@@ -259,7 +286,7 @@ class TransformerLayer(BaseLayer):
                     tensor,
                     *sharded_offsets,
                     replica_id=replica_id,
-                    prepend_axis_num=1,  # for PP sharding
+                    prepend_axis_num=1 if 'local_experts' not in layer_name else 2,  # for PP or PP + EP sharding
                 )
 
         return sharded_state_dict
