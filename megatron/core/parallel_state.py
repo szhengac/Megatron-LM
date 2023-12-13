@@ -28,6 +28,7 @@ _TENSOR_AND_DATA_PARALLEL_GROUP = None
 # Expert parallel group that the current rank belongs to.
 _TENSOR_AND_EXPERT_PARALLEL_GROUP = None
 _DATA_MODULO_EXPERT_PARALLEL_GROUP = None
+_EXPERT_PARALLEL_GROUP = None
 
 
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = None
@@ -399,6 +400,10 @@ def initialize_model_parallel(
     assert (
         _TENSOR_AND_EXPERT_PARALLEL_GROUP is None
     ), 'Tensor + expert parallel group is already initialized'
+    global _EXPERT_PARALLEL_GROUP
+    assert (
+        _EXPERT_PARALLEL_GROUP is None
+    ), 'Expert parallel group is already initialized'
     global _DATA_MODULO_EXPERT_PARALLEL_GROUP
     assert (
         _DATA_MODULO_EXPERT_PARALLEL_GROUP is None
@@ -407,6 +412,7 @@ def initialize_model_parallel(
     num_tensor_and_data_groups: int = world_size // tensor_and_data_group_size
     tensor_and_expert_group_size: int = tensor_model_parallel_size * expert_model_parallel_size
     num_expert_groups: int = data_parallel_size // expert_model_parallel_size
+    num_tensor_expert_groups: int = world_size // tensor_and_expert_group_size
     for i in range(num_tensor_and_data_groups):
         for j in range(num_expert_groups):
             start_rank = i * tensor_and_data_group_size + j * tensor_and_expert_group_size
@@ -415,6 +421,13 @@ def initialize_model_parallel(
             group = torch.distributed.new_group(ranks)
             if rank in ranks:
                 _TENSOR_AND_EXPERT_PARALLEL_GROUP = group
+
+    for i in range(num_tensor_expert_groups):
+        for j in range(tensor_model_parallel_size):
+            ranks = range(i * tensor_and_expert_group_size + j, (i + 1) * tensor_and_expert_group_size, tensor_model_parallel_size)
+            group = torch.distributed.new_group(ranks)
+            if rank in ranks:
+                _EXPERT_PARALLEL_GROUP = group
 
     for i in range(num_tensor_and_data_groups):
         start_rank = i * tensor_and_data_group_size
@@ -556,6 +569,13 @@ def get_tensor_and_expert_parallel_group():
         _TENSOR_AND_EXPERT_PARALLEL_GROUP is not None
     ), 'tensor and expert parallel group is not initialized'
     return _TENSOR_AND_EXPERT_PARALLEL_GROUP
+
+
+def get_expert_parallel_group():
+    assert (
+        _EXPERT_PARALLEL_GROUP is not None
+    ), 'expert parallel group is not initialized'
+    return _EXPERT_PARALLEL_GROUP
 
 
 def get_data_modulo_expert_parallel_group():
@@ -956,3 +976,5 @@ def destroy_model_parallel():
     _MPU_EXPERT_MODEL_PARALLEL_RANK = None
     global _MPU_DATA_MODULO_EXPERT_PARALLEL_RANK
     _MPU_DATA_MODULO_EXPERT_PARALLEL_RANK = None
+    global _EXPERT_PARALLEL_GROUP
+    _EXPERT_PARALLEL_GROUP = None

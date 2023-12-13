@@ -107,6 +107,25 @@ def _gather_along_first_dim(input_):
 
     return output
 
+def _gather_along_uneven_first_dim(input_, sizes):
+    """Gather tensors."""
+
+    world_size = get_tensor_model_parallel_world_size()
+    # Bypass the function if we are using only 1 GPU.
+    if world_size == 1:
+        return [input_]
+
+    dim_size = tuple(input_.size()[1:])
+    total_size = (sum(sizes),) + dim_size
+    output = torch.empty(total_size, dtype=input_.dtype, device=torch.cuda.current_device())
+    output_list = list(output.split(sizes, dim=0))
+
+    torch.distributed.all_gather(
+        output_list, input_.contiguous(), group=get_tensor_model_parallel_group()
+    )
+
+    return output
+
 
 def _reduce_scatter_along_first_dim(input_):
     """Reduce-scatter the input tensor across model parallel group."""
@@ -125,6 +144,24 @@ def _reduce_scatter_along_first_dim(input_):
     output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
     torch.distributed._reduce_scatter_base(
         output, input_.contiguous(), group=get_tensor_model_parallel_group()
+    )
+    return output
+
+
+def _reduce_scatter_along_uneven_first_dim(input_):
+    """Reduce-scatter the input tensor list across model parallel group."""
+    world_size = get_tensor_model_parallel_world_size()
+    # Bypass the function if we are using only 1 GPU.
+    if world_size == 1:
+        return input_[0]
+
+    assert (
+        len(input_) == world_size
+    ), "The number of tensors in input_ should match the tensor parallel size"
+
+    output = torch.empty_like(input_[get_tensor_model_parallel_rank()])
+    torch.distributed.reduce_scatter(
+        output, [inp.contiguous() for inp in input_], group=get_tensor_model_parallel_group()
     )
     return output
 
@@ -269,6 +306,36 @@ class _GatherFromSequenceParallelRegion(torch.autograd.Function):
             return _split_along_first_dim(grad_output), None
 
 
+class _GatherFromUnevenSequenceParallelRegion(torch.autograd.Function):
+    """Gather the input from sequence parallel region."""
+
+    @staticmethod
+    def symbolic(graph, input_, sizes, tensor_parallel_output_grad=True):
+        return _gather_along_uneven_first_dim(input_, sizes, split)
+
+    @staticmethod
+    def forward(ctx, input_, sizes, tensor_parallel_output_grad=True):
+        ctx.tensor_parallel_output_grad = tensor_parallel_output_grad
+        ctx.sizes = sizes
+        return _gather_along_uneven_first_dim(input_, sizes)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        tensor_parallel_output_grad = ctx.tensor_parallel_output_grad
+        sizes = ctx.sizes
+
+        grad_output = list(grad_output.split(sizes, dim=0))
+
+        # If the computation graph after the gather operation is
+        # in the tensor parallel mode, output gradients need to reduce
+        # scattered and whereas if the computation is duplicated,
+        # output gradients need to be scattered.
+        if tensor_parallel_output_grad:
+            return _reduce_scatter_along_uneven_first_dim(grad_output), None, None, None
+        else:
+            return grad_output[get_tensor_model_parallel_rank()], None, None, None
+
+
 class _ReduceScatterToSequenceParallelRegion(torch.autograd.Function):
     """Reduce scatter the input from the model parallel region."""
 
@@ -283,6 +350,25 @@ class _ReduceScatterToSequenceParallelRegion(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         return _gather_along_first_dim(grad_output)
+
+
+class _ReduceScatterToUnevenSequenceParallelRegion(torch.autograd.Function):
+    """Reduce scatter the input from the model parallel region."""
+
+    @staticmethod
+    def symbolic(graph, *input_):
+        return _reduce_scatter_along_uneven_first_dim(input_)
+
+    @staticmethod
+    def forward(ctx, *input_):
+        ctx.sizes = [inp.size(0) for inp in input_]
+        return _reduce_scatter_along_uneven_first_dim(input_)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        sizes = ctx.sizes
+        gathered_grad_input = _gather_along_uneven_first_dim(grad_output, ctx.sizes)
+        return gathered_grad_input.split(sizes, dim=0)
 
 
 class _GatherFromSequenceParallelRegionToMOE(torch.autograd.Function):
@@ -356,3 +442,11 @@ def gather_from_sequence_parallel_region_to_moe(input_):
 
 def reduce_scatter_to_sequence_parallel_region_from_moe(input_):
     return _ReduceScatterToSequenceParallelRegionFromMOE.apply(input_)
+
+
+def gather_from_uneven_sequence_parallel_region(input_, sizes, tensor_parallel_output_grad=True):
+    return _GatherFromUnevenSequenceParallelRegion.apply(input_, sizes, tensor_parallel_output_grad)
+
+
+def reduce_scatter_to_uneven_sequence_parallel_region(input_):
+    return _ReduceScatterToUnevenSequenceParallelRegion.apply(*input_)

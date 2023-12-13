@@ -18,6 +18,8 @@ from .mappings import (
     reduce_scatter_to_sequence_parallel_region_from_moe,
     scatter_to_sequence_parallel_region,
     scatter_to_tensor_model_parallel_region,
+    gather_from_uneven_sequence_parallel_region,
+    reduce_scatter_to_uneven_sequence_parallel_region,
 )
 from .random import (
     checkpoint,
@@ -30,6 +32,7 @@ from .utils import (
     split_tensor_along_last_dim,
     split_tensor_into_1d_equal_chunks,
 )
+from .all_to_all import all_to_all
 
 __all__ = [
     # cross_entropy.py
@@ -62,4 +65,7 @@ __all__ = [
     "gather_split_1d_tensor",
     "gather_from_sequence_parallel_region_to_moe",
     "reduce_scatter_to_sequence_parallel_region_from_moe",
+    "gather_from_uneven_sequence_parallel_region",
+    "reduce_scatter_to_uneven_sequence_parallel_region",
+    "all_to_all",
 ]
