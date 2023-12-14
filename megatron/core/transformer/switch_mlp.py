@@ -41,19 +41,6 @@ def get_router_linear_layer(config):
     return router
 
 
-class Identity(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input_, msg):
-        ctx.msg = msg
-        return input_
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        msg = ctx.msg
-        print(f"Identity backward at {msg}")
-        return grad_output, None
-
-
 class SwitchMLP(MegatronModule):
     """
     Top-1 Mixture of Experts Layer. Routes input to one of N MLP "experts"
@@ -160,24 +147,36 @@ class SwitchMLP(MegatronModule):
             bin_counts = torch.bincount(sorted_max_ind, minlength=self.config.num_moe_experts)
             routed_bin_counts = torch.zeros_like(bin_counts)
             torch.distributed.all_to_all_single(routed_bin_counts, bin_counts, group=expert_group)
-            routed_bin_counts_list = routed_bin_counts.tolist()
-            bin_counts_list = bin_counts.tolist()
+            if self.num_local_experts > 1:
+                routed_bin_counts_list = routed_bin_counts.reshape((-1, self.num_local_experts)).sum(dim=-1).tolist()
+                bin_counts_list = bin_counts.reshape((-1, self.num_local_experts)).sum(dim=-1).tolist()
+            else:
+                routed_bin_counts_list = routed_bin_counts.tolist()
+                bin_counts_list = bin_counts.tolist()
    
         hidden_states = hidden_states[indices, ...]
         hidden_states, ep_handle = all_to_all(hidden_states, routed_bin_counts_list, bin_counts_list, expert_group, async_op=True)
 
-        if self.sequence_parallel:
-            with torch.no_grad():
-                total_routed_bin_counts = tensor_parallel.gather_from_sequence_parallel_region(
-                    routed_bin_counts
-                )
-                global_hidden_state_sizes = \
-                        total_routed_bin_counts.reshape((get_tensor_model_parallel_world_size(), self.config.num_moe_experts)).sum(dim=-1).tolist()
+        if self.num_local_experts > 1:
+            if self.sequence_parallel:
+                with torch.no_grad():
+                    total_routed_bin_counts = tensor_parallel.gather_from_sequence_parallel_region(
+                        routed_bin_counts
+                    )
+                    global_hidden_state_sizes = \
+                            total_routed_bin_counts.reshape((get_tensor_model_parallel_world_size(), self.config.num_moe_experts)).sum(dim=-1).tolist()
 
-        local_token_indices = \
-                torch.repeat_interleave(torch.arange(self.num_local_experts,
-                    device=hidden_states.device).repeat(get_tensor_model_parallel_world_size() * self.expert_parallel_size),
-                    total_routed_bin_counts)
+            local_token_indices = \
+                    torch.repeat_interleave(torch.arange(self.num_local_experts,
+                        device=hidden_states.device).repeat(get_tensor_model_parallel_world_size() * self.expert_parallel_size),
+                        total_routed_bin_counts)
+        else:
+            if self.sequence_parallel:
+                with torch.no_grad():
+                    total_routed_bin_counts = tensor_parallel.gather_from_sequence_parallel_region(
+                        routed_bin_counts.sum(dim=0, keepdim=True)
+                    )
+                    global_hidden_state_sizes = total_routed_bin_counts.tolist()
 
         if self.sequence_parallel:
             ep_handle.wait()
@@ -185,17 +184,23 @@ class SwitchMLP(MegatronModule):
                 hidden_states, global_hidden_state_sizes
             )
 
-        output_total = torch.zeros_like(hidden_states)
-        if self.add_bias:
-            output_bias_total = torch.zeros_like(hidden_states)
-        for local_expert_index, expert in enumerate(self.local_experts):
-            local_indices = (local_token_indices == local_expert_index).nonzero()
-            hidden = hidden_states[local_indices, ...]
-            output, output_bias = expert(hidden)
-            output_total[local_indices, ...] = output
+        if self.num_local_experts > 1:
+            output_total = torch.zeros_like(hidden_states)
             if self.add_bias:
-                output_bias = output_bias.expand_as(output)
-                output_bias_total[local_indices, ...] = output_bias
+                output_bias_total = torch.zeros_like(hidden_states)
+            for local_expert_index, expert in enumerate(self.local_experts):
+                local_indices = (local_token_indices == local_expert_index).nonzero()
+                hidden = hidden_states[local_indices, ...]
+                output, output_bias = expert(hidden)
+                output_total[local_indices, ...] = output
+                if self.add_bias:
+                    output_bias = output_bias.expand_as(output)
+                    output_bias_total[local_indices, ...] = output_bias
+        else:
+            output, output_bias = self.local_experts[0](hidden_states.unsqueeze(1))
+            output_total = output.squeeze(1)
+            if self.add_bias:
+                output_bias_total = output_bias.expand_as(output)
 
         if self.sequence_parallel:
             output_total = tensor_parallel.reduce_scatter_to_uneven_sequence_parallel_region(
