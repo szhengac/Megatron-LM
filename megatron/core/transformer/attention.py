@@ -295,7 +295,7 @@ class SelfAttention(Attention):
             self.query_projection_size + 2 * self.kv_projection_size,
             config=self.config,
             init_method=self.config.init_method,
-            bias=self.config.add_bias_linear,
+            bias=self.config.qkv_bias,
             skip_bias_add=False,
         )
 
