@@ -34,11 +34,12 @@ class RotaryEmbedding(nn.Module):
     Args:
         kv_channels (int): Projection weights dimension in multi-head attention. Obtained from transformer config
         rotary_percent (float): Percent of rotary dimension to use for rotary position embeddings.
+        rotary_base (int): Base of rotary inv freq.
         seq_len_interpolation_factor (float, optional): scale of linearly interpolating RoPE for longer sequences. The value must be a float larger than 1.0. Defaults to None
     """
 
     def __init__(
-        self, kv_channels: int, rotary_percent: float, seq_len_interpolation_factor: float = None
+        self, kv_channels: int, rotary_percent: float, rotary_base: int, seq_len_interpolation_factor: float = None
     ) -> None:
         super().__init__()
 
@@ -48,7 +49,7 @@ class RotaryEmbedding(nn.Module):
 
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
         self.inv_freq = 1.0 / (
-            10000
+            rotary_base
             ** (
                 torch.arange(0, dim, 2, dtype=torch.float32, device=torch.cuda.current_device())
                 / dim

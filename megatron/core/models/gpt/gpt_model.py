@@ -32,6 +32,7 @@ class GPTModel(LanguageModule):
         share_embeddings_and_output_weights (bool, optional): When True, input embeddings and output logit weights are shared. Defaults to False.
         position_embedding_type (Literal[learned_absolute,rope], optional):  Position embedding type.. Defaults to 'learned_absolute'.
         rotary_percent (float, optional): Percent of rotary dimension to use for rotary position embeddings. Ignored unless position_embedding_type is 'rope'. Defaults to 1.0.
+        rotary_base (int, optional): Base of rotary inv freq. Default to 10000.
         seq_len_interpolation_factor (Optional[float], optional): scale of linearly interpolating RoPE for longer sequences. The value must be a float larger than 1.0. Defaults to None.
     """
 
@@ -48,6 +49,7 @@ class GPTModel(LanguageModule):
         share_embeddings_and_output_weights: bool = False,
         position_embedding_type: Literal['learned_absolute', 'rope'] = 'learned_absolute',
         rotary_percent: float = 1.0,
+        rotary_base: int = 10000,
         seq_len_interpolation_factor: Optional[float] = None,
     ) -> None:
         super().__init__(config=config)
@@ -76,7 +78,7 @@ class GPTModel(LanguageModule):
 
         if self.position_embedding_type == 'rope':
             self.rotary_pos_emb = RotaryEmbedding(
-                self.config.kv_channels, rotary_percent, seq_len_interpolation_factor
+                self.config.kv_channels, rotary_percent, rotary_base, seq_len_interpolation_factor
             )
 
         # Transformer.

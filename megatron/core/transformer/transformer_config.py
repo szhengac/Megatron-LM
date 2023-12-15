@@ -146,6 +146,7 @@ class TransformerConfig(ModelParallelConfig):
     layernorm_epsilon: float = 1e-5
     layernorm_zero_centered_gamma: bool = False
     add_bias_linear: bool = True
+    qkv_bias: bool = False
     gated_linear_unit: bool = False
     activation_func: Callable = F.gelu
     num_moe_experts: int = None
