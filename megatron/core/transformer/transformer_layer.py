@@ -290,7 +290,7 @@ class TransformerLayer(BaseLayer):
                     prepend_axis_num=prepend_axis_num,
                 )
 
-                if 'linear_fc1' in layer_name:
+                if 'linear_fc1.weight' in layer_name or 'linear_fc1.bias' in layer_name:
                     self._sharded_state_dict_for_glu(layer_key, sharded_offsets, prepend_axis_num, sharded_state_dict)
 
         return sharded_state_dict

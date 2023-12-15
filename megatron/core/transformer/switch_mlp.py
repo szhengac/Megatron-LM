@@ -56,7 +56,7 @@ class SwitchMLP(MegatronModule):
         self.add_bias = config.add_bias_linear
         self.sequence_parallel = config.sequence_parallel
         self.route_algo = sinkhorn
-        self.router_activation = torch.sigmoid
+        self.router_activation = torch.softmax
         self.expert_parallel_size = parallel_state.get_expert_model_parallel_world_size()
 
         assert self.config.num_moe_experts % self.expert_parallel_size == 0
@@ -156,6 +156,8 @@ class SwitchMLP(MegatronModule):
    
         hidden_states = hidden_states[indices, ...]
         hidden_states, ep_handle = all_to_all(hidden_states, routed_bin_counts_list, bin_counts_list, expert_group, async_op=True)
+        if 0 in routed_bin_counts_list:
+            print(f"routed_bin_counts_list={routed_bin_counts_list}, hidden_states.shape={hidden_states.shape}")
 
         if self.num_local_experts > 1:
             if self.sequence_parallel:
@@ -243,14 +245,23 @@ class SwitchMLP(MegatronModule):
 
         if self.training:
             with torch.no_grad():
-                norm_route = self.route_algo(
-                    route.detach().to(dtype=torch.float32)
+                expert_group = get_expert_parallel_group()
+                idx = torch.randperm(route.size()[0])
+                shuffled_route = torch.empty_like(route)
+                torch.distributed.all_to_all_single(shuffled_route, route[idx], group=expert_group)
+                shuffled_norm_route = self.route_algo(
+                    shuffled_route.detach().to(dtype=torch.float32)
                 )  # explicit fp32 conversion for stability
-                _, max_ind = torch.max(norm_route, dim=1)
-            route = self.router_activation(route)
+                _, shuffled_max_ind = torch.max(shuffled_norm_route, dim=1)
+                shuffled_max_ind = shuffled_max_ind.to(dtype=torch.uint8)
+                max_ind_out = torch.empty_like(shuffled_max_ind)
+                torch.distributed.all_to_all_single(max_ind_out, shuffled_max_ind, group=expert_group)
+                max_ind = torch.empty_like(max_ind_out, dtype=torch.int)
+                max_ind[idx] = max_ind_out.int() 
+            route = self.router_activation(route.float(), dim=1).to(dtype=route.dtype)
             max_prob = route[torch.arange(route.size(0)), max_ind]
         else:
-            route = self.router_activation(route)
+            route = self.router_activation(route.float(), dim=1).to(dtype=route.dtype)
             max_prob, max_ind = torch.max(route, dim=1)
 
         max_prob = torch.unsqueeze(max_prob, 1)
