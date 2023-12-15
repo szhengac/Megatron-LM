@@ -16,8 +16,10 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from .mlp import MLP, MLPSubmodules
 
 
-def sinkhorn(cost, tol=0.0001):
+def sinkhorn(cost, tol=0.0001, penalty=1.0):
     "Sinkhorn based MoE routing function"
+    if penalty != 1.0:
+        cost /= penalty
     cost = torch.exp(cost)
     d0 = torch.ones(cost.size(0), device=cost.device, dtype=cost.dtype)
     d1 = torch.ones(cost.size(1), device=cost.device, dtype=cost.dtype)
@@ -60,6 +62,9 @@ class SwitchMLP(MegatronModule):
         self.expert_parallel_size = parallel_state.get_expert_model_parallel_world_size()
 
         assert self.config.num_moe_experts % self.expert_parallel_size == 0
+        assert self.config.num_experts_per_token <= self.config.num_moe_experts
+        self.num_experts_per_token = self.config.num_experts_per_token
+        self.num_moe_experts = self.config.num_moe_experts
         self.num_local_experts = self.config.num_moe_experts // self.expert_parallel_size
         local_expert_indices_offset = (
             parallel_state.get_expert_model_parallel_rank() * self.num_local_experts
@@ -91,7 +96,7 @@ class SwitchMLP(MegatronModule):
         torch.distributed._all_gather_base(output, local_indices.contiguous(), group=group)
         return output
 
-    def gather_forward(self, hidden_states, route, max_prob, max_ind, hidden_shape):
+    def gather_forward(self, hidden_states, max_ind):
         if self.sequence_parallel or (self.expert_parallel_size > 1):
             global_hidden_states = tensor_parallel.gather_from_sequence_parallel_region_to_moe(
                 hidden_states
@@ -102,6 +107,7 @@ class SwitchMLP(MegatronModule):
             global_indices = max_ind
 
         output_total = torch.zeros_like(global_hidden_states)
+        output_bias_total = None
         if self.add_bias:
             output_bias_total = torch.zeros_like(global_hidden_states)
 
@@ -124,27 +130,20 @@ class SwitchMLP(MegatronModule):
                 output_bias_total = tensor_parallel.reduce_scatter_to_sequence_parallel_region_from_moe(
                     output_bias_total
                 )
-                # bias is duplicated across tensor parallelism ranks;
+                # bias is duplicated across tensor parallelism ranks for row parallel linear;
                 # reduce scatter reduces bias across tensor parallel_ranks
                 output_bias_total = (
                     output_bias_total / parallel_state.get_tensor_model_parallel_world_size()
                 )
 
-        output_total = output_total * max_prob
-        output_total = output_total.view(hidden_shape)
-        if self.add_bias:
-            output_bias_total = output_bias_total * max_prob
-            output_bias_total = output_bias_total.view(hidden_shape)
-        else:
-            output_bias_total = None
         return output_total, output_bias_total
 
-    def alltoall_forward(self, hidden_states, route, max_prob, max_ind, hidden_shape):
+    def alltoall_forward(self, hidden_states, max_ind):
         expert_group = get_expert_parallel_group()
 
         with torch.no_grad():
             sorted_max_ind, indices = torch.sort(max_ind, dim=0)
-            bin_counts = torch.bincount(sorted_max_ind, minlength=self.config.num_moe_experts)
+            bin_counts = torch.bincount(sorted_max_ind, minlength=self.num_moe_experts)
             routed_bin_counts = torch.zeros_like(bin_counts)
             torch.distributed.all_to_all_single(routed_bin_counts, bin_counts, group=expert_group)
             if self.num_local_experts > 1:
@@ -156,8 +155,6 @@ class SwitchMLP(MegatronModule):
    
         hidden_states = hidden_states[indices, ...]
         hidden_states, ep_handle = all_to_all(hidden_states, routed_bin_counts_list, bin_counts_list, expert_group, async_op=True)
-        if 0 in routed_bin_counts_list:
-            print(f"routed_bin_counts_list={routed_bin_counts_list}, hidden_states.shape={hidden_states.shape}")
 
         if self.num_local_experts > 1:
             if self.sequence_parallel:
@@ -166,7 +163,7 @@ class SwitchMLP(MegatronModule):
                         routed_bin_counts
                     )
                     global_hidden_state_sizes = \
-                            total_routed_bin_counts.reshape((get_tensor_model_parallel_world_size(), self.config.num_moe_experts)).sum(dim=-1).tolist()
+                            total_routed_bin_counts.reshape((get_tensor_model_parallel_world_size(), self.num_moe_experts)).sum(dim=-1).tolist()
 
             local_token_indices = \
                     torch.repeat_interleave(torch.arange(self.num_local_experts,
@@ -186,6 +183,7 @@ class SwitchMLP(MegatronModule):
                 hidden_states, global_hidden_state_sizes
             )
 
+        output_bias_total = None
         if self.num_local_experts > 1:
             output_total = torch.zeros_like(hidden_states)
             if self.add_bias:
@@ -212,7 +210,7 @@ class SwitchMLP(MegatronModule):
                 output_bias_total = tensor_parallel.reduce_scatter_to_uneven_sequence_parallel_region(
                     torch.split(output_total_bias, global_hidden_state_sizes, dim=0)
                 )
-                # bias is duplicated across tensor parallelism ranks;
+                # bias is duplicated across tensor parallelism ranks for row parallel linear;
                 # reduce scatter reduces bias across tensor parallel_ranks
                 output_bias_total = (
                     output_bias_total / get_tensor_model_parallel_world_size()
@@ -229,45 +227,54 @@ class SwitchMLP(MegatronModule):
             ep_bias_handle.wait()
             output_total_bias = output_total_bias[reversed_indices, ...]
 
-        output_total = output_total * max_prob
-        output_total = output_total.view(hidden_shape)
-        if self.add_bias:
-            output_bias_total = output_bias_total * max_prob
-            output_bias_total = output_bias_total.view(hidden_shape)
-        else:
-            output_bias_total = None
         return output_total, output_bias_total
+
+    def token_shuffling(self, route):
+        expert_group = get_expert_parallel_group()
+
+        idx = torch.randperm(route.size()[0])
+        shuffled_route = torch.empty_like(route)
+
+        torch.distributed.all_to_all_single(shuffled_route, route[idx], group=expert_group)
+        shuffled_norm_route = self.route_algo(
+            shuffled_route.detach().to(dtype=torch.float32)
+        )  # explicit fp32 conversion for stability
+        _, shuffled_max_ind = torch.topk(shuffled_norm_route, self.num_experts_per_token, dim=1)
+
+        shuffled_max_ind = shuffled_max_ind.to(dtype=torch.uint8)
+        max_ind_out = torch.empty_like(shuffled_max_ind)
+        torch.distributed.all_to_all_single(max_ind_out, shuffled_max_ind, group=expert_group)
+        max_ind = torch.empty_like(max_ind_out, dtype=torch.int)
+        max_ind[idx] = max_ind_out.int()
+        
+        return max_ind.view(-1)
 
     def forward(self, hidden_states):
         hidden_shape = hidden_states.shape
         route = self.router(hidden_states)
-        route = route.view(-1, self.config.num_moe_experts)
+        route = route.view(-1, self.num_moe_experts)
 
         if self.training:
             with torch.no_grad():
-                expert_group = get_expert_parallel_group()
-                idx = torch.randperm(route.size()[0])
-                shuffled_route = torch.empty_like(route)
-                torch.distributed.all_to_all_single(shuffled_route, route[idx], group=expert_group)
-                shuffled_norm_route = self.route_algo(
-                    shuffled_route.detach().to(dtype=torch.float32)
-                )  # explicit fp32 conversion for stability
-                _, shuffled_max_ind = torch.max(shuffled_norm_route, dim=1)
-                shuffled_max_ind = shuffled_max_ind.to(dtype=torch.uint8)
-                max_ind_out = torch.empty_like(shuffled_max_ind)
-                torch.distributed.all_to_all_single(max_ind_out, shuffled_max_ind, group=expert_group)
-                max_ind = torch.empty_like(max_ind_out, dtype=torch.int)
-                max_ind[idx] = max_ind_out.int() 
+                max_ind = self.token_shuffling(route)
             route = self.router_activation(route.float(), dim=1).to(dtype=route.dtype)
-            max_prob = route[torch.arange(route.size(0)), max_ind]
+            max_prob = route[torch.arange(route.size(0)).repeat_interleave(self.num_experts_per_token), max_ind]
         else:
             route = self.router_activation(route.float(), dim=1).to(dtype=route.dtype)
-            max_prob, max_ind = torch.max(route, dim=1)
+            max_prob, max_ind = torch.topk(route, self.num_experts_per_token, dim=1)
+            max_prob = max_prob.view(-1)
+            max_ind = max_ind.view(-1)
 
         max_prob = torch.unsqueeze(max_prob, 1)
-        hidden_states = hidden_states.view(-1, hidden_shape[-1])
+        hidden_states = hidden_states.view(-1, hidden_shape[-1]).repeat_interleave(self.num_experts_per_token, dim=0)
 
-        #output_total, output_bias_total = self.gather_forward(hidden_states, route, max_prob, max_ind, hidden_shape)
-        output_total, output_bias_total = self.alltoall_forward(hidden_states, route, max_prob, max_ind, hidden_shape)
+        #output_total, output_bias_total = self.gather_forward(hidden_states, max_ind)
+        output_total, output_bias_total = self.alltoall_forward(hidden_states, max_ind)
+
+        output_total = output_total * max_prob
+        output_total = output_total.view(*hidden_shape[:-1], self.num_experts_per_token, hidden_shape[-1]).sum(dim=-2)
+        if self.add_bias:
+            output_bias_total = output_bias_total * max_prob
+            output_bias_total = output_bias_total.view(*hidden_shape[:-1], self.num_experts_per_token, hidden_shape[-1]).sum(dim=-2)
 
         return output_total, output_bias_total

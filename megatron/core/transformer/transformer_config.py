@@ -48,6 +48,8 @@ class TransformerConfig(ModelParallelConfig):
         num_moe_experts (int): Number of experts to use for Mixture of Experts. 
                                When set, it replaces MLP with Switch MLP. Defaults to None (no MoE).
 
+        num_experts_per_token (int): Number of experts to process each token when MoE is enabled. Defaults to 1.
+
         # initialization
         init_method (Callable): Method to initialize weights. Note that bias is always set to
                                 zero. Should be a function that takes a single Tensor and
@@ -150,6 +152,7 @@ class TransformerConfig(ModelParallelConfig):
     gated_linear_unit: bool = False
     activation_func: Callable = F.gelu
     num_moe_experts: int = None
+    num_experts_per_token: int = 1
 
     # initialization
     init_method: Callable = None
