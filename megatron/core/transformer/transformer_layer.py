@@ -1,12 +1,12 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
 from dataclasses import dataclass
-from typing import Union
+from typing import Union, Tuple, Dict
 
 import torch
 
 from megatron.core import parallel_state
-from megatron.core.dist_checkpointing.mapping import ShardedObject, ShardedTensor
+from megatron.core.dist_checkpointing.mapping import ShardedObject, ShardedTensor, ShardedTensorFactory
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.identity_op import IdentityFuncOp, IdentityOp
 from megatron.core.transformer.base_layer import BaseLayer, LayerSubmodules
@@ -233,34 +233,35 @@ class TransformerLayer(BaseLayer):
             global_layer_offset = self.layer_number - 1  # self.layer_number starts at 1
             layer_key = f'{prefix}{global_layer_offset - offset}.{layer_name}'  # module list index in TransformerBlock
             sharded_offsets = [(0, global_layer_offset, num_layers)]  # PP sharding
+            prepend_axis_num = 1 if 'local_experts' not in layer_name else 2  # for PP or PP + EP sharding
 
             if layer_name in tensor_parallel_layers_axis_map and 'local_experts' not in layer_name:
                 tp_axis = tensor_parallel_layers_axis_map[layer_name]
                 # TP sharding
                 sharded_offsets.append(
                     [
-                        tp_axis + 1,  # +1 for PP dimension
+                        tp_axis + prepend_axis_num, # +1 for PP dimension
                         parallel_state.get_tensor_model_parallel_rank(),
                         parallel_state.get_tensor_model_parallel_world_size(),
                     ]
                 )
                 replica_id = parallel_state.get_data_parallel_rank()
             elif layer_name in tensor_parallel_layers_axis_map and 'local_experts' in layer_name:
+                # EP sharding
+                sharded_offsets.append(
+                    [
+                        prepend_axis_num - 1,  # +1 for PP dimension
+                        parallel_state.get_expert_model_parallel_rank(),
+                        parallel_state.get_expert_model_parallel_world_size()
+                    ]
+                )
                 tp_axis = tensor_parallel_layers_axis_map[layer_name]
                 # TP sharding
                 sharded_offsets.append(
                     [
-                        tp_axis + 2,  # +2 for PP and EP dimensions
+                        tp_axis + prepend_axis_num,  # +2 for PP and EP dimensions
                         parallel_state.get_tensor_model_parallel_rank(),
                         parallel_state.get_tensor_model_parallel_world_size(),
-                    ]
-                )
-                # EP sharding
-                sharded_offsets.append(
-                    [
-                        1,  # +1 for PP dimension
-                        parallel_state.get_expert_model_parallel_rank(),
-                        parallel_state.get_expert_model_parallel_world_size()
                     ]
                 )
                 replica_id = parallel_state.get_data_modulo_expert_parallel_rank()
@@ -286,7 +287,63 @@ class TransformerLayer(BaseLayer):
                     tensor,
                     *sharded_offsets,
                     replica_id=replica_id,
-                    prepend_axis_num=1 if 'local_experts' not in layer_name else 2,  # for PP or PP + EP sharding
+                    prepend_axis_num=prepend_axis_num,
                 )
 
+                if 'linear_fc1' in layer_name:
+                    self._sharded_state_dict_for_glu(layer_key, sharded_offsets, prepend_axis_num, sharded_state_dict)
+
         return sharded_state_dict
+
+
+    def _sharded_state_dict_for_glu(
+        self,
+        layer_key: str,
+        sharded_offsets: Tuple[Tuple[int, int, int]],
+        prepend_axis_num: int,
+        sharded_state_dict: Dict,
+    ):
+        assert 'linear_fc1' in layer_key, layer_key
+        prev_sh_ten = sharded_state_dict[layer_key]
+        # Remove the existing TP sharded offsets
+        sharded_offsets = sharded_offsets[:-1]
+
+        # We must split the tensor into 2 parts, each sharded separately.
+        # This requires a ShardedTensorFactory which `chunk`s during saving
+        # and `cat`s during loading
+        tp_rank = parallel_state.get_tensor_model_parallel_rank()
+        tp_size = parallel_state.get_tensor_model_parallel_world_size()
+
+        tp_shard_axis = 0
+        replica_id = prev_sh_ten.replica_id
+        def sh_ten_build_fn(key: str, t: torch.Tensor):
+            offset_w = (tp_shard_axis + prepend_axis_num, tp_rank, tp_size * 2)
+            offset_v = (tp_shard_axis + prepend_axis_num, tp_size + tp_rank, tp_size * 2)
+            with torch.no_grad():
+                tensor_w, tensor_v = torch.chunk(t, 2, dim=tp_shard_axis)
+            return [
+                ShardedTensor.from_rank_offsets(
+                    key,
+                    tensor_w,
+                    *sharded_offsets,
+                    offset_w,
+                    replica_id=replica_id,
+                    prepend_axis_num=prepend_axis_num,
+                ),
+                ShardedTensor.from_rank_offsets(
+                    key,
+                    tensor_v,
+                    *sharded_offsets,
+                    offset_v,
+                    replica_id=replica_id,
+                    prepend_axis_num=prepend_axis_num,
+                ),
+            ]
+
+        def sh_ten_merge_fn(sub_state_dict):
+            with torch.no_grad():
+                return torch.cat(sub_state_dict)
+
+        sharded_state_dict[layer_key] = ShardedTensorFactory(
+            prev_sh_ten.key, prev_sh_ten.data, sh_ten_build_fn, sh_ten_merge_fn
+        )
