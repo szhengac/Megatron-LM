@@ -1,5 +1,6 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
+import re
 from dataclasses import dataclass
 from typing import Union, Tuple, Dict
 
@@ -216,6 +217,7 @@ class TransformerLayer(BaseLayer):
         }
 
         # Expert layer axis map
+        pattern = re.compile(r'local_experts.(\d+)')
         num_local_experts = self.config.num_moe_experts // parallel_state.get_expert_model_parallel_world_size()
         for local_expert_idx in range(num_local_experts):
             tensor_parallel_layers_axis_map.update(
@@ -248,11 +250,12 @@ class TransformerLayer(BaseLayer):
                 replica_id = parallel_state.get_data_parallel_rank()
             elif layer_name in tensor_parallel_layers_axis_map and 'local_experts' in layer_name:
                 # EP sharding
+                local_expert_idx = int(pattern.findall(layer_name)[0])
                 sharded_offsets.append(
                     [
                         prepend_axis_num - 1,  # +1 for PP dimension
-                        parallel_state.get_expert_model_parallel_rank(),
-                        parallel_state.get_expert_model_parallel_world_size()
+                        parallel_state.get_expert_model_parallel_rank() * num_local_experts + local_expert_idx,
+                        self.config.num_moe_experts,
                     ]
                 )
                 tp_axis = tensor_parallel_layers_axis_map[layer_name]
@@ -272,18 +275,29 @@ class TransformerLayer(BaseLayer):
                     + parallel_state.get_tensor_model_parallel_rank()
                 )
 
+            if 'local_experts' not in layer_name:
+                ten_key = f'{prefix}{layer_name}'
+            else:
+                trimmed_layer_name = layer_name.replace('local_experts.' + pattern.findall(layer_name)[0] + '.', 'local_experts.')
+                ten_key = f'{prefix}{trimmed_layer_name}'
+
             if layer_name.endswith('._extra_state'):
+                if 'local_experts' not in layer_name:
+                    global_shape = (num_layers,)
+                    global_offset = (global_layer_offset,)
+                else:
+                    global_shape = (num_layers, self.config.num_moe_experts)
+                    global_offset = (global_layer_offset, parallel_state.get_expert_model_parallel_rank() * num_local_experts + local_expert_idx)
                 sharded_state_dict[layer_key] = ShardedObject(
-                    f'{prefix}{layer_name}',
+                    ten_key,
                     tensor,
-                    (num_layers,),
-                    (global_layer_offset,),
+                    global_shape,
+                    global_offset,
                     replica_id,
                 )
-
             else:
                 sharded_state_dict[layer_key] = ShardedTensor.from_rank_offsets(
-                    f'{prefix}{layer_name}',
+                    ten_key,
                     tensor,
                     *sharded_offsets,
                     replica_id=replica_id,

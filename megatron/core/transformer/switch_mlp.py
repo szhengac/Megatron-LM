@@ -232,7 +232,7 @@ class SwitchMLP(MegatronModule):
     def token_shuffling(self, route):
         expert_group = get_expert_parallel_group()
 
-        idx = torch.randperm(route.size()[0])
+        idx = torch.randperm(route.size()[0], device=route.device)
         shuffled_route = torch.empty_like(route)
 
         torch.distributed.all_to_all_single(shuffled_route, route[idx], group=expert_group)
