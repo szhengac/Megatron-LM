@@ -336,11 +336,10 @@ class SwitchMLP(MegatronModule):
             if max_ind is None:
                 _, max_ind = torch.topk(route, self.num_experts_per_token, dim=1)
             max_ind = max_ind.view(-1)
-            sorted_max_ind, _ = torch.sort(max_ind, dim=0)
-            bin_counts = torch.bincount(sorted_max_ind, minlength=self.num_moe_experts)
+            bin_counts = torch.histc(max_ind, bins=self.num_moe_experts, min=0, max=self.num_moe_experts - 1)
         return bin_counts
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, forward_only=False):
         hidden_shape = hidden_states.shape
         route = self.router(hidden_states)
         route = route.view(-1, self.num_moe_experts)
@@ -368,10 +367,11 @@ class SwitchMLP(MegatronModule):
             output_bias_total = output_bias_total * max_prob
             output_bias_total = output_bias_total.view(*hidden_shape[:-1], self.num_experts_per_token, hidden_shape[-1]).sum(dim=-2)
 
-        if self.training:
-            tokens_per_expert = self.compute_bins(route)
-        else:
-            tokens_per_expert = self.compute_bins(route, max_ind)
-        save_load_balancing_loss((tokens_per_expert, route))
+        if not forward_only:
+            if self.training:
+                tokens_per_expert = self.compute_bins(route)
+            else:
+                tokens_per_expert = self.compute_bins(route, max_ind)
+            save_load_balancing_loss((tokens_per_expert, route))
 
         return output_total, output_bias_total
