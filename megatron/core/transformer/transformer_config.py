@@ -50,6 +50,8 @@ class TransformerConfig(ModelParallelConfig):
 
         num_experts_per_token (int): Number of experts to process each token when MoE is enabled. Defaults to 1.
 
+        moe_loss_weight (float): regularization hyperparameter for load balancing loss for MoE. Defaults to 0.01.
+
         # initialization
         init_method (Callable): Method to initialize weights. Note that bias is always set to
                                 zero. Should be a function that takes a single Tensor and
@@ -153,6 +155,7 @@ class TransformerConfig(ModelParallelConfig):
     activation_func: Callable = F.gelu
     num_moe_experts: int = None
     num_experts_per_token: int = 1
+    moe_loss_weight: float = 0.01
 
     # initialization
     init_method: Callable = None

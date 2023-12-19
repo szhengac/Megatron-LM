@@ -16,6 +16,24 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from .mlp import MLP, MLPSubmodules
 
 
+_LOAD_BALANCING_LOSS = []
+
+
+def save_load_balancing_loss(loss):
+    global _LOAD_BALANCING_LOSS
+    _LOAD_BALANCING_LOSS.append(loss)
+
+
+def get_load_balancing_loss():
+    global _LOAD_BALANCING_LOSS
+    return _LOAD_BALANCING_LOSS
+
+
+def clear_load_balancing_loss():
+    global _LOAD_BALANCING_LOSS
+    _LOAD_BALANCING_LOSS.clear()
+
+
 def sinkhorn(cost, tol=0.0001, penalty=1.0):
     "Sinkhorn based MoE routing function"
     if penalty != 1.0:
@@ -41,6 +59,70 @@ def get_router_linear_layer(config):
         config.init_method(router.weight)
     setattr(router.weight, 'sequence_parallel', config.sequence_parallel)
     return router
+
+
+def batched_load_balancing_loss(config):
+    # tokens_per_expert[i].shape = (num_experts)
+    # expert_scores[i].shape = (tokens, num_experts)
+    tokens_per_expert, expert_scores = zip(*get_load_balancing_loss())
+    num_layers_per_pipeline_stage = (
+        config.num_layers // config.pipeline_model_parallel_size)
+    if config.virtual_pipeline_model_parallel_size is not None:
+        num_layers_per_pipeline_stage /= config.virtual_pipeline_model_parallel_size
+
+    if len(tokens_per_expert) != num_layers_per_pipeline_stage:
+        raise ValueError(
+            f"Expected {num_layers_per_pipeline_stage} token_per_experts "
+            f"but found {len(tokens_per_expert)}.\nnum_layers = "
+            f"{config.num_layers}\npipeline_model_parallel_size = "
+            f"{config.pipeline_model_parallel_size}\n"
+            "virtual_pipeline_model_parallel_size"
+            f" = {config.virtual_pipeline_model_parallel_size}")
+    if len(expert_scores) != num_layers_per_pipeline_stage:
+        raise ValueError(
+            f"Expected {num_layers_per_pipeline_stage} expert_scores "
+            f"but found {len(tokens_per_expert)}.\nnum_layers = "
+            f"{config.num_layers}\npipeline_model_parallel_size = "
+            f"{config.pipeline_model_parallel_size}\n"
+            "virtual_pipeline_model_parallel_size"
+            f" = {config.virtual_pipeline_model_parallel_size}")
+
+    # Verify the shape of the tokens_per_expert and expert_scores tensors.
+    assert all([
+        x.ndim == 1 and x.numel() == config.num_moe_experts
+        for x in tokens_per_expert
+    ])
+
+    tokens = expert_scores[0].shape[0]
+    assert all([
+        (x.ndim == 2 and x.shape[1] == config.num_moe_experts and
+         x.shape[0] == tokens) for x in expert_scores
+    ])
+
+
+    # Concatenate the contributions of each layer and convert to
+    # the correct types and formats for the dot product.
+    expert_scores = torch.cat(expert_scores, dim=1).float().mean(dim=0)
+    tokens_per_expert = torch.cat(tokens_per_expert).to(expert_scores.dtype)
+
+    expected_values = num_layers_per_pipeline_stage * config.num_moe_experts
+    assert tokens_per_expert.numel() == expected_values
+    assert expert_scores.numel() == expected_values
+
+    # Calculate the total scale across all factors.
+    #
+    # loss_weight * num_experts / (num_layers * tokens * top_k)
+    scale_numerator = (
+        config.num_moe_experts *
+        config.moe_loss_weight
+    )
+    scale_denominator = (
+        config.num_layers *
+        tokens *
+        config.num_experts_per_token
+    )
+    scale = scale_numerator / scale_denominator
+    return scale * torch.dot(tokens_per_expert, expert_scores)
 
 
 class SwitchMLP(MegatronModule):
@@ -249,6 +331,15 @@ class SwitchMLP(MegatronModule):
         
         return max_ind.view(-1)
 
+    def compute_bins(self, route, max_ind=None):
+        with torch.no_grad():
+            if max_ind is None:
+                _, max_ind = torch.topk(route, self.num_experts_per_token, dim=1)
+            max_ind = max_ind.view(-1)
+            sorted_max_ind, _ = torch.sort(max_ind, dim=0)
+            bin_counts = torch.bincount(sorted_max_ind, minlength=self.num_moe_experts)
+        return bin_counts
+
     def forward(self, hidden_states):
         hidden_shape = hidden_states.shape
         route = self.router(hidden_states)
@@ -276,5 +367,11 @@ class SwitchMLP(MegatronModule):
         if self.add_bias:
             output_bias_total = output_bias_total * max_prob
             output_bias_total = output_bias_total.view(*hidden_shape[:-1], self.num_experts_per_token, hidden_shape[-1]).sum(dim=-2)
+
+        if self.training:
+            tokens_per_expert = self.compute_bins(route)
+        else:
+            tokens_per_expert = self.compute_bins(route, max_ind)
+        save_load_balancing_loss((tokens_per_expert, route))
 
         return output_total, output_bias_total

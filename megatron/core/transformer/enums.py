@@ -8,6 +8,7 @@ import enum
 class ModelType(enum.Enum):
     encoder_or_decoder = 1
     encoder_and_decoder = 2
+    encoder_or_decoder_with_lbl = 5
 
 
 # class LayerType(enum.Enum):

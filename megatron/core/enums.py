@@ -8,3 +8,4 @@ class ModelType(enum.Enum):
     encoder_and_decoder = 2
     retro_encoder = 3
     retro_decoder = 4
+    encoder_or_decoder_with_lbl = 5

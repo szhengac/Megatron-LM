@@ -14,6 +14,7 @@ from megatron.core.transformer.enums import AttnMaskType, ModelType
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.transformer.switch_mlp import SwitchMLP
 from megatron.core.utils import make_tp_sharded_tensor_for_checkpoint
 
 
@@ -66,7 +67,10 @@ class GPTModel(LanguageModule):
 
         # megatron core pipelining currently depends on model type
         # TODO: remove this dependency ?
-        self.model_type = ModelType.encoder_or_decoder
+        if self.config.num_moe_experts is not None and transformer_layer_spec.submodules.mlp.module == SwitchMLP:
+            self.model_type = ModelType.encoder_or_decoder_with_lbl
+        else:
+            self.model_type = ModelType.encoder_or_decoder
 
         if self.pre_process:
             self.embedding = LanguageModelEmbedding(
