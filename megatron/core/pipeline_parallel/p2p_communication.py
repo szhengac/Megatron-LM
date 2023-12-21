@@ -104,7 +104,7 @@ def _communicate_shapes(tensor_send_next, tensor_send_prev, recv_prev, recv_next
 
         # To protect against race condition when using batch_isend_irecv().
         # should take this out once the bug with batch_isend_irecv is resolved.
-        torch.cuda.synchronize()
+        #torch.cuda.synchronize()
 
     recv_prev_shape = [0, 0, 0]
     if recv_prev_shape_tensor is not None:
@@ -339,10 +339,10 @@ def _communicate(
             req.wait()
         reqs = None
 
-    if config.batch_p2p_comm and config.batch_p2p_sync:
-        # To protect against race condition when using batch_isend_irecv().
-        # User should assert that we have a modern enough PyTorch to not need this
-        torch.cuda.synchronize()
+    #if config.batch_p2p_comm and config.batch_p2p_sync:
+    #    # To protect against race condition when using batch_isend_irecv().
+    #    # User should assert that we have a modern enough PyTorch to not need this
+    #    torch.cuda.synchronize()
 
     return tensor_recv_prev, tensor_recv_next, reqs
 
