@@ -271,14 +271,14 @@ def backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, c
         output_tensor[0] = config.grad_scale_func(output_tensor[0])
 
     if config.deallocate_pipeline_outputs:
-        if parallel_state.is_pipeline_last_stage():
+        if parallel_state.is_pipeline_last_stage() or model_type != ModelType.encoder_or_decoder_with_lbl:
             custom_backward(output_tensor[0], output_tensor_grad[0])
         elif model_type == ModelType.encoder_or_decoder_with_lbl:
             if config.grad_scale_func is not None:
                 output_tensor[1] = config.grad_scale_func(output_tensor[1])
             custom_backward(output_tensor[0], output_tensor_grad[0], lbl_loss=output_tensor[1])
     else:
-        if parallel_state.is_pipeline_last_stage():
+        if parallel_state.is_pipeline_last_stage() or model_type != ModelType.encoder_or_decoder_with_lbl:
             torch.autograd.backward(output_tensor[0], grad_tensors=output_tensor_grad[0])
         elif model_type == ModelType.encoder_or_decoder_with_lbl:
             if config.grad_scale_func is not None:
