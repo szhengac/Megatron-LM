@@ -49,7 +49,7 @@ def get_gpt_layer_local_spec() -> ModuleSpec:
     return ModuleSpec(
         module=TransformerLayer,
         submodules=TransformerLayerSubmodules(
-            input_layernorm=FusedLayerNorm,
+            input_layernorm=TENorm,
             self_attention=ModuleSpec(
                 module=SelfAttention,
                 params={"attn_mask_type": AttnMaskType.causal},
@@ -62,7 +62,7 @@ def get_gpt_layer_local_spec() -> ModuleSpec:
                 ),
             ),
             self_attn_bda=get_bias_dropout_add,
-            pre_mlp_layernorm=FusedLayerNorm,
+            pre_mlp_layernorm=TENorm,
             mlp=ModuleSpec(
                 module=MLP,
                 submodules=MLPSubmodules(
