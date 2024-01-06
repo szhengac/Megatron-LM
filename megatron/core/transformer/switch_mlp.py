@@ -356,7 +356,8 @@ class SwitchMLP(MegatronModule):
             max_prob, max_ind = torch.topk(route, self.num_experts_per_token, dim=1)
             max_ind = max_ind.view(-1)
 
-        max_prob /= max_prob.sum(dim=-1, keepdim=True)
+        if self.num_experts_per_token > 1:
+            max_prob /= max_prob.sum(dim=-1, keepdim=True)
         max_prob = max_prob.view(-1).unsqueeze(1)
         hidden_states = hidden_states.view(-1, hidden_shape[-1]).repeat_interleave(self.num_experts_per_token, dim=0)
 
