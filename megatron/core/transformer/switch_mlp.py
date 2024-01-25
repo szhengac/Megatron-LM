@@ -234,8 +234,9 @@ class SwitchMLP(MegatronModule):
             else:
                 routed_bin_counts_list = routed_bin_counts.tolist()
                 bin_counts_list = bin_counts.tolist()
-   
-        hidden_states = hidden_states[indices.tolist(), ...]
+
+        indices = indices.view(-1, 1).expand(-1, hidden_states.shape[-1])
+        hidden_states = torch.gather(hidden_states, 0, indices)
         hidden_states, ep_handle = all_to_all(hidden_states, routed_bin_counts_list, bin_counts_list, expert_group, async_op=True)
 
         if self.num_local_experts > 1:
@@ -272,13 +273,14 @@ class SwitchMLP(MegatronModule):
             if self.add_bias:
                 output_bias_total = torch.zeros_like(hidden_states)
             for local_expert_index, expert in enumerate(self.local_experts):
-                local_indices = (local_token_indices == local_expert_index).nonzero()
-                hidden = hidden_states[local_indices, ...]
+                local_indices = (local_token_indices == local_expert_index).view(-1, 1)
+                hidden = torch.masked_select(hidden_states, local_indices).view(-1, hidden_states.shape[-1]).unsqueeze(1)
                 output, output_bias = expert(hidden)
-                output_total[local_indices, ...] = output
+                output = output.squeeze(dim=1)
+                output_total = output_total.masked_scatter_(local_indices, output)
                 if self.add_bias:
                     output_bias = output_bias.expand_as(output)
-                    output_bias_total[local_indices, ...] = output_bias
+                    output_bias_total = output_bias_total.masked_scatter_(local_indices, output_bias)
         else:
             output, output_bias = self.local_experts[0](hidden_states.unsqueeze(1))
             output_total = output.squeeze(1)
@@ -303,22 +305,25 @@ class SwitchMLP(MegatronModule):
         if self.add_bias:
             output_total_bias, ep_bias_handle = all_to_all(output_total_bias, bin_counts_list, routed_bin_counts_list, expert_group, async_op=True)
 
-        reversed_indices = torch.argsort(indices, dim=0).tolist()
+        unpermuted_output_total = torch.zeros_like(output_total)
         ep_handle.wait()
-        output_total = output_total[reversed_indices, ...]
+        output_total = unpermuted_output_total.scatter_(0, indices, output_total)
         if self.add_bias:
+            unpermuted_output_total_bias = torch.zeros_like(output_total_bias)
             ep_bias_handle.wait()
-            output_total_bias = output_total_bias[reversed_indices, ...]
+            output_total_bias = unpermuted_output_total_bias.scatter_(0, indices, output_total_bias)
 
         return output_total, output_bias_total
 
     def token_shuffling(self, route):
         expert_group = get_expert_parallel_group()
 
-        idx = torch.randperm(route.size()[0], device=route.device).tolist()
+        idx = torch.randperm(route.size()[0], device=route.device)
         shuffled_route = torch.empty_like(route)
 
-        torch.distributed.all_to_all_single(shuffled_route, route[idx], group=expert_group)
+        idx = idx.view(-1, 1)
+        permuted_route = torch.gather(route, 0, idx.expand(-1, route.shape[-1]))
+        torch.distributed.all_to_all_single(shuffled_route, permuted_route, group=expert_group)
         shuffled_norm_route = self.route_algo(
             shuffled_route.detach().to(dtype=torch.float32)
         )  # explicit fp32 conversion for stability
@@ -327,10 +332,10 @@ class SwitchMLP(MegatronModule):
         shuffled_max_ind = shuffled_max_ind.to(dtype=torch.uint8)
         max_ind_out = torch.empty_like(shuffled_max_ind)
         torch.distributed.all_to_all_single(max_ind_out, shuffled_max_ind, group=expert_group)
-        max_ind = torch.empty_like(max_ind_out, dtype=torch.int)
-        max_ind[idx] = max_ind_out.int()
+        max_ind = torch.empty_like(max_ind_out, dtype=torch.int64)
+        max_ind = max_ind.scatter_(0, idx.expand(-1, max_ind.shape[-1]), max_ind_out.long())
         
-        return max_ind.view(-1)
+        return max_ind
 
     def compute_bins(self, route, max_ind=None):
         with torch.no_grad():
@@ -349,16 +354,15 @@ class SwitchMLP(MegatronModule):
             with torch.no_grad():
                 max_ind = self.token_shuffling(route)
             route = self.router_activation(route.float(), dim=1).to(dtype=route.dtype)
-            max_prob = route[torch.arange(route.size(0)).repeat_interleave(self.num_experts_per_token).tolist(), max_ind.tolist()]
-            max_prob = max_prob.view(-1, self.num_experts_per_token)
+            max_prob = torch.gather(route, 1, max_ind)
         else:
             route = self.router_activation(route.float(), dim=1).to(dtype=route.dtype)
             max_prob, max_ind = torch.topk(route, self.num_experts_per_token, dim=1)
-            max_ind = max_ind.view(-1)
 
         if self.num_experts_per_token > 1:
             max_prob /= max_prob.sum(dim=-1, keepdim=True)
         max_prob = max_prob.view(-1).unsqueeze(1)
+        max_ind = max_ind.view(-1)
         hidden_states = hidden_states.view(-1, hidden_shape[-1]).repeat_interleave(self.num_experts_per_token, dim=0)
 
         #output_total, output_bias_total = self.gather_forward(hidden_states, max_ind)
